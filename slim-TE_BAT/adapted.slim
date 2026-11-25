@@ -13,13 +13,14 @@ initialize() {
 	defineConstant("Scentro_B_end", 2000000);  // end centromere Bolck B
 	defineConstant("Peri_B_start", 2000001);   // strat pericentromeric regions Bolck B
 	defineConstant("Peri_B_end", 2500000);     // end pericentromeric regions Bolck B
-	defineConstant("recombSupp_start", 2500001);   // start target recombination-suppressed region
-	defineConstant("recombSupp_end", 2750000);     // end target recombination-suppressed region
+	defineConstant("recombSupp_start", 2500001);   // start target region
+	defineConstant("recombSupp_end", 2750000);     // end target region
 	
-	defineConstant("rec_arm", 1e-4);          // recombination rate in chrom. arm
-	defineConstant("rec_peri", 5e-5);         // recombination rate in pericentr. region
-	defineConstant("rec_supp", 1e-5);         // recombination rate in target suppressed region
-	defineConstant("rec_cent", 1e-5);         // recombination rate in centromere
+	// Per-base, per-gamete breakpoint probabilities.
+	defineConstant("rec_arm", 1e-8);          // recombination rate in chromosome arms
+	defineConstant("rec_peri", 5e-9);         // recombination rate in pericentromeric regions
+	defineConstant("rec_cent", 1e-9);         // recombination rate in the centromere
+	defineConstant("rec_supp", 0.0);          // target-region rate after suppression begins
 
 	
 	
@@ -42,7 +43,7 @@ initialize() {
 		rec_cent, // 1,000,001-1,500,000
 		rec_cent, // 1,500,001-2,000,000
 		rec_peri, // 2,000,001-2,500,000
-		rec_supp, // 2,500,001-2,750,000
+		rec_arm,  // 2,500,001-2,750,000: target before suppression
 		rec_arm   // 2,750,001-2,999,999
 	);
 	initializeRecombinationRate(rates, ends);

@@ -1,0 +1,520 @@
+// Factorial scenario 04: TE burst and recombination suppression.
+//
+// Shared design: 5,000 fixed active founder TEs, a 5,000-generation burn-in,
+// a possible burst window at generations 5,001-5,250, a possible suppression
+// onset at generation 6,000, and final observation at generation 7,000.
+// The two treatment switches below define this hardcoded scenario.
+
+initialize()
+{
+	// Reproducibility and duration.
+	defineConstant("RNG_SEED", 20261125);
+	defineConstant("POPULATION_SIZE", 500);
+	defineConstant("FINAL_GENERATION", 7000);
+	setSeed(RNG_SEED);
+
+	// Chromosome coordinates.
+	defineConstant("L", 3000000);
+	defineConstant("PERI_A_START", 500001);
+	defineConstant("PERI_A_END", 1000000);
+	defineConstant("CENT_A_END", 1500000);
+	defineConstant("CENT_B_END", 2000000);
+	defineConstant("PERI_B_END", 2500000);
+	defineConstant("TARGET_START", 2500001);
+	defineConstant("TARGET_END", 2750000);
+
+	// Per-base, per-gamete breakpoint probabilities.
+	defineConstant("REC_ARM", 1e-8);
+	defineConstant("REC_PERI", 5e-9);
+	defineConstant("REC_CENT", 1e-9);
+	defineConstant("REC_SUPPRESSED", 0.0);
+	defineConstant("BURST_ENABLED", T);
+	defineConstant("SUPPRESSION_ENABLED", T);
+	defineConstant("T_SUPP", 6000);
+	defineConstant("SCENARIO_NAME", "04_yesBurst_yesSuppression");
+
+	// TE process.
+	defineConstant("INITIAL_TE_COUNT", 5000);
+	defineConstant("TE_JUMP_BACKGROUND", 0.0001);
+	defineConstant("TE_JUMP_BURST", 0.001);
+	defineConstant("TE_DISABLE_PROBABILITY", 0.00005);
+	defineConstant("TE_SELECTION_COEFFICIENT", -0.0002);
+
+	// Neutral SNP process retained for comparison with TE age-frequency data.
+	defineConstant("NEUTRAL_MUTATION_RATE", 1e-6);
+
+	// Hardcoded output schedule and filenames.
+	defineConstant(
+		"SAMPLE_GENERATIONS",
+		c(5000, 5050, 5250, 5500, 5999, 6000, 6250, 6500, 7000)
+	);
+	defineConstant("TE_OUTPUT_FILE", SCENARIO_NAME + "_te.csv");
+	defineConstant("SNP_OUTPUT_FILE", SCENARIO_NAME + "_snp.csv");
+	defineConstant("EVENT_OUTPUT_FILE", SCENARIO_NAME + "_events.csv");
+	defineConstant("METADATA_OUTPUT_FILE", SCENARIO_NAME + "_metadata.csv");
+
+	// The target interval initially has the ordinary chromosome-arm rate.
+	defineConstant(
+		"RECOMBINATION_ENDS",
+		c(
+			PERI_A_START - 1,
+			PERI_A_END,
+			CENT_A_END,
+			CENT_B_END,
+			PERI_B_END,
+			TARGET_END,
+			L - 1
+		)
+	);
+	defineConstant(
+		"NORMAL_RECOMBINATION_RATES",
+		c(
+			REC_ARM,
+			REC_PERI,
+			REC_CENT,
+			REC_CENT,
+			REC_PERI,
+			REC_ARM,
+			REC_ARM
+		)
+	);
+	defineConstant(
+		"SUPPRESSED_RECOMBINATION_RATES",
+		c(
+			REC_ARM,
+			REC_PERI,
+			REC_CENT,
+			REC_CENT,
+			REC_PERI,
+			REC_SUPPRESSED,
+			REC_ARM
+		)
+	);
+	initializeRecombinationRate(
+		NORMAL_RECOMBINATION_RATES,
+		RECOMBINATION_ENDS
+	);
+
+	initializeMutationRate(NEUTRAL_MUTATION_RATE);
+	initializeMutationType("m1", 0.5, "f", 0.0); // neutral SNPs
+	initializeGenomicElementType("g1", m1, 1.0);
+	initializeGenomicElement(g1, 0, L - 1);
+
+	// Active and disabled copies currently have the same fitness effect.
+	initializeMutationType(
+		"m2",
+		0.5,
+		"f",
+		TE_SELECTION_COEFFICIENT
+	);
+	m2.convertToSubstitution = F;
+	initializeMutationType(
+		"m3",
+		0.5,
+		"f",
+		TE_SELECTION_COEFFICIENT
+	);
+	m3.convertToSubstitution = F;
+}
+
+
+// Return the named chromosome region containing position.
+function (string$) teRegion(integer$ position)
+{
+	if (position < PERI_A_START)
+		return "left_arm";
+	if (position <= PERI_A_END)
+		return "peri_A";
+	if (position <= CENT_A_END)
+		return "cent_A";
+	if (position <= CENT_B_END)
+		return "cent_B";
+	if (position <= PERI_B_END)
+		return "peri_B";
+	if (position <= TARGET_END)
+		return "target";
+	return "right_arm";
+}
+
+
+// Return the realized recombination rate in the target interval.
+function (float$) currentTargetRecombinationRate(void)
+{
+	if (SUPPRESSION_ENABLED & sim.generation >= T_SUPP)
+		return REC_SUPPRESSED;
+	return REC_ARM;
+}
+
+
+// Return elapsed generations under suppression, or -1 before/without it.
+function (integer$) currentSuppressionAge(void)
+{
+	if (SUPPRESSION_ENABLED & sim.generation >= T_SUPP)
+		return sim.generation - T_SUPP;
+	return -1;
+}
+
+
+// Make active TE copies transpose at the supplied per-copy rate.
+function (void) transposeTEs(float$ jumpProbability)
+{
+	for (genome in p1.genomes)
+	{
+		activeTEs = genome.mutationsOfType(m2);
+		activeCount = size(activeTEs);
+		if (!activeCount)
+			next;
+
+		jumpCount = rpois(1, activeCount * jumpProbability);
+		jumpCount = min(c(activeCount, jumpCount));
+		if (!jumpCount)
+			next;
+
+		// Each source insertion can copy at most once per genome per generation.
+		jumpSources = sample(activeTEs, jumpCount);
+		for (sourceTE in jumpSources)
+		{
+			position = rdunif(1, 0, L - 1);
+			newTE = genome.addNewDrawnMutation(m2, position);
+			newTE.tag = sim.tag;
+			newTE.setValue("origin_generation", sim.generation);
+			newTE.setValue("is_founder", F);
+			sim.tag = sim.tag + 1;
+		}
+	}
+}
+
+
+// Write one row per extant insertion lineage, combining active and disabled
+// copies that share an insertion ID.
+function (void) writeTESnapshot(void)
+{
+	activeTEs = sim.mutationsOfType(m2);
+	disabledTEs = sim.mutationsOfType(m3);
+	insertionIDs = sort(unique(c(activeTEs.tag, disabledTEs.tag)));
+	if (!size(insertionIDs))
+		return;
+
+	genomeCount = size(p1.genomes);
+	rows = rep("", size(insertionIDs));
+
+	for (i in seqAlong(insertionIDs))
+	{
+		insertionID = insertionIDs[i];
+		active = activeTEs[activeTEs.tag == insertionID];
+		disabled = disabledTEs[disabledTEs.tag == insertionID];
+
+		if (size(active) > 1 | size(disabled) > 1)
+			stop("Insertion ID maps to multiple mutation objects: " +
+				insertionID);
+
+		activeCount = size(active) ? sim.mutationCounts(NULL, active) else 0;
+		disabledCount = size(disabled) ?
+			sim.mutationCounts(NULL, disabled) else 0;
+		totalCount = activeCount + disabledCount;
+
+		representative = size(active) ? active else disabled;
+		position = representative.position;
+		originGeneration = representative.getValue("origin_generation");
+		isFounder = representative.getValue("is_founder");
+
+		if (size(active) & size(disabled))
+		{
+			if (active.position != disabled.position)
+				stop("Position mismatch for insertion ID " + insertionID);
+			if (active.getValue("origin_generation") !=
+				disabled.getValue("origin_generation"))
+				stop("Origin mismatch for insertion ID " + insertionID);
+			if (active.getValue("is_founder") !=
+				disabled.getValue("is_founder"))
+				stop("Founder-state mismatch for insertion ID " +
+					insertionID);
+		}
+
+		if (activeCount & disabledCount)
+			activityState = "mixed";
+		else if (activeCount)
+			activityState = "active";
+		else
+			activityState = "disabled";
+
+		rows[i] = paste(c(
+			sim.generation,
+			insertionID,
+			position,
+			teRegion(position),
+			originGeneration,
+			sim.generation - originGeneration,
+			asInteger(isFounder),
+			activeCount,
+			disabledCount,
+			totalCount,
+			totalCount / genomeCount,
+			activeCount / totalCount,
+			activityState,
+			asInteger(SUPPRESSION_ENABLED & sim.generation >= T_SUPP),
+			currentSuppressionAge(),
+			currentTargetRecombinationRate()
+		), sep=",");
+	}
+
+	writeFile(TE_OUTPUT_FILE, rows, append=T);
+}
+
+
+// Write the contemporaneous neutral SNP age-frequency distribution.
+function (void) writeSNPSnapshot(void)
+{
+	snps = sim.mutationsOfType(m1);
+	if (!size(snps))
+		return;
+
+	frequencies = sim.mutationFrequencies(NULL, snps);
+	rows = rep("", size(snps));
+	for (i in seqAlong(snps))
+	{
+		snp = snps[i];
+		rows[i] = paste(c(
+			sim.generation,
+			snp.position,
+			teRegion(snp.position),
+			snp.originGeneration,
+			sim.generation - snp.originGeneration,
+			frequencies[i],
+			asInteger(SUPPRESSION_ENABLED & sim.generation >= T_SUPP),
+			currentSuppressionAge(),
+			currentTargetRecombinationRate()
+		), sep=",");
+	}
+
+	writeFile(SNP_OUTPUT_FILE, rows, append=T);
+}
+
+
+// Keep transposition and sampling order explicit within each generation.
+function (void) runTEGeneration(float$ jumpProbability)
+{
+	transposeTEs(jumpProbability);
+	if (any(SAMPLE_GENERATIONS == sim.generation))
+	{
+		writeTESnapshot();
+		writeSNPSnapshot();
+	}
+}
+
+
+// Population, output files, and singleton initial TE insertions.
+1 late()
+{
+	sim.addSubpop("p1", POPULATION_SIZE);
+	sim.tag = 0;
+
+	writeFile(
+		TE_OUTPUT_FILE,
+		"generation,insertion_id,position,region,origin_generation,age," +
+		"is_founder," +
+		"active_count,disabled_count,total_count,total_frequency," +
+		"active_fraction,activity_state,suppression_active," +
+		"suppression_age,target_recombination_rate",
+		append=F
+	);
+	writeFile(
+		SNP_OUTPUT_FILE,
+		"generation,position,region,origin_generation,age,frequency," +
+		"suppression_active,suppression_age,target_recombination_rate",
+		append=F
+	);
+	writeFile(
+		EVENT_OUTPUT_FILE,
+		c(
+			"generation,event,target_recombination_rate,te_jump_rate",
+			"1,simulation_start," + REC_ARM + "," +
+				TE_JUMP_BACKGROUND
+		),
+		append=F
+	);
+	writeFile(
+		METADATA_OUTPUT_FILE,
+		c(
+			"parameter,value",
+			"scenario," + SCENARIO_NAME,
+			"seed," + RNG_SEED,
+			"population_size," + POPULATION_SIZE,
+			"chromosome_length," + L,
+			"initial_te_count," + INITIAL_TE_COUNT,
+			"initial_te_state,fixed",
+			"te_jump_background," + TE_JUMP_BACKGROUND,
+			"te_jump_burst," + TE_JUMP_BURST,
+			"te_disable_probability," + TE_DISABLE_PROBABILITY,
+			"te_selection_coefficient," + TE_SELECTION_COEFFICIENT,
+			"neutral_mutation_rate," + NEUTRAL_MUTATION_RATE,
+			"burst_start,5001",
+			"burst_end,5250",
+			"burst_enabled," + BURST_ENABLED,
+			"suppression_enabled," + SUPPRESSION_ENABLED,
+			"suppression_generation," + T_SUPP,
+			"target_start," + TARGET_START,
+			"target_end," + TARGET_END,
+			"target_rate_before," + REC_ARM,
+			"target_rate_after," + REC_SUPPRESSED,
+			"final_generation," + FINAL_GENERATION
+		),
+		append=F
+	);
+
+	// Retain Horvath's active source reservoir: each founder insertion begins
+	// fixed in all haploid genomes.  The output marks these loci as founders so
+	// they can be excluded from analyses of segregating de novo insertions.
+	positions = rdunif(INITIAL_TE_COUNT, 0, L - 1);
+	for (position in positions)
+	{
+		newTE = p1.genomes.addNewDrawnMutation(m2, position);
+		newTE.tag = sim.tag;
+		newTE.setValue("origin_generation", sim.generation);
+		newTE.setValue("is_founder", T);
+		sim.tag = sim.tag + 1;
+	}
+}
+
+
+// Convert inherited active copies to disabled copies during offspring creation.
+modifyChild()
+{
+	for (genome in child.genomes)
+	{
+		activeTEs = genome.mutationsOfType(m2);
+		activeCount = size(activeTEs);
+		if (!activeCount)
+			next;
+
+		disableCount = rpois(1, activeCount * TE_DISABLE_PROBABILITY);
+		disableCount = min(c(activeCount, disableCount));
+		if (!disableCount)
+			next;
+
+		toDisable = sample(activeTEs, disableCount);
+		for (activeTE in toDisable)
+		{
+			disabled = sim.mutationsOfType(m3);
+			disabled = disabled[disabled.tag == activeTE.tag];
+			if (size(disabled) > 1)
+				stop("Multiple disabled mutation objects for insertion ID " +
+					activeTE.tag);
+
+			genome.removeMutations(activeTE);
+			if (size(disabled))
+			{
+				genome.addMutations(disabled);
+			}
+			else
+			{
+				disabled = genome.addNewDrawnMutation(m3, activeTE.position);
+				disabled.tag = activeTE.tag;
+				disabled.setValue(
+					"origin_generation",
+					activeTE.getValue("origin_generation")
+				);
+				disabled.setValue(
+					"is_founder",
+					activeTE.getValue("is_founder")
+				);
+			}
+		}
+	}
+
+	return T;
+}
+
+
+// Apply the suppressed map immediately before offspring generation T_SUPP.
+early()
+{
+	if (sim.generation != T_SUPP)
+		return;
+
+	if (SUPPRESSION_ENABLED)
+	{
+		sim.chromosome.setRecombinationRate(
+			SUPPRESSED_RECOMBINATION_RATES,
+			RECOMBINATION_ENDS
+		);
+		writeFile(
+			EVENT_OUTPUT_FILE,
+			T_SUPP + ",suppression_begins," + REC_SUPPRESSED + "," +
+				TE_JUMP_BACKGROUND,
+			append=T
+		);
+	}
+	else
+	{
+		writeFile(
+			EVENT_OUTPUT_FILE,
+			T_SUPP + ",no_suppression_control," + REC_ARM + "," +
+				TE_JUMP_BACKGROUND,
+			append=T
+		);
+	}
+}
+
+
+// Linear TE-activity timeline.
+1:5000 late()
+{
+	runTEGeneration(TE_JUMP_BACKGROUND);
+}
+
+5001:5250 late()
+{
+	if (sim.generation == 5001)
+	{
+		burstEvent = "background_continues";
+		burstRate = TE_JUMP_BACKGROUND;
+		if (BURST_ENABLED)
+		{
+			burstEvent = "te_burst_begins";
+			burstRate = TE_JUMP_BURST;
+		}
+		writeFile(
+			EVENT_OUTPUT_FILE,
+			"5001," + burstEvent + "," +
+				currentTargetRecombinationRate() + "," + burstRate,
+			append=T
+		);
+	}
+
+	jumpProbability = TE_JUMP_BACKGROUND;
+	if (BURST_ENABLED)
+		jumpProbability = TE_JUMP_BURST;
+	runTEGeneration(jumpProbability);
+}
+
+5251:7000 late()
+{
+	if (sim.generation == 5251)
+	{
+		burstEvent = "background_continues";
+		if (BURST_ENABLED)
+			burstEvent = "te_burst_ends";
+		writeFile(
+			EVENT_OUTPUT_FILE,
+			"5251," + burstEvent + "," +
+				currentTargetRecombinationRate() + "," +
+				TE_JUMP_BACKGROUND,
+			append=T
+		);
+	}
+
+	runTEGeneration(TE_JUMP_BACKGROUND);
+
+	if (sim.generation == FINAL_GENERATION)
+	{
+		writeFile(
+			EVENT_OUTPUT_FILE,
+			FINAL_GENERATION + ",simulation_ends," +
+				currentTargetRecombinationRate() + "," +
+				TE_JUMP_BACKGROUND,
+			append=T
+		);
+		sim.simulationFinished();
+	}
+}
